@@ -75,7 +75,7 @@ def render_terminal_summary(summary: DiagnosticSummary) -> str:
             lines.append(f"  • {err}")
 
     lines.append("================================================================")
-    lines.append(" Note : Ce diagnostic par défaut est strictement en LECTURE SEULE.")
+    lines.append(" Note : Ce diagnostic par défaut est strictly en LECTURE SEULE.")
     lines.append("================================================================")
     return "\n".join(lines)
 
@@ -168,12 +168,12 @@ def main():
     parser.add_argument(
         "--prepare-boot",
         action="store_true",
-        help="Préparer le démarrage interne et sauvegarder le BCD (Nécessite --confirm)."
+        help="Préparer le démarrage interne et sauvegarder le BCD (Nécessite --confirm et --verify-iso)."
     )
     parser.add_argument(
         "--restore-bcd",
         action="store_true",
-        help="Restaurer le BCD Windows depuis la sauvegarde d'urgence."
+        help="Restaurer le BCD Windows depuis la sauvegarde d'urgence (Nécessite --confirm)."
     )
     parser.add_argument(
         "--verify-iso",
@@ -203,15 +203,18 @@ def main():
     # Mode 1: Restore BCD
     if args.restore_bcd:
         rec = RecoveryManager(simulated=args.simulate)
-        ok, msg = rec.restore_bcd()
+        ok, msg = rec.restore_bcd(user_confirmed=args.confirm)
         print(f"[{'✓' if ok else '❌'}] Restauration BCD : {msg}")
         sys.exit(0 if ok else 1)
 
-    # Mode 2: Verify ISO
+    # Track ISO verification status
+    iso_verified = False
     if args.verify_iso:
-        ok, msg = IsoManager.verify_iso(args.verify_iso, expected_sha256=args.expected_sha256)
-        print(f"[{'✓' if ok else '❌'}] Intégrité ISO : {msg}")
-        sys.exit(0 if ok else 1)
+        ok_iso, msg_iso, actual_hash = IsoManager.verify_iso(args.verify_iso, expected_sha256=args.expected_sha256)
+        print(f"[{'✓' if ok_iso else '❌'}] Intégrité ISO : {msg_iso}")
+        iso_verified = ok_iso
+        if not args.prepare_boot:
+            sys.exit(0 if ok_iso else 1)
 
     # Mode 3: Diagnostic Standard
     collector = get_collector(simulated=args.simulate)
@@ -235,7 +238,11 @@ def main():
     # Mode 4: Prepare Boot (if requested)
     if args.prepare_boot:
         bm = BootManager(simulated=args.simulate)
-        ok, msg = bm.prepare_boot(report, user_confirmed=args.confirm)
+        ok, msg = bm.prepare_boot(
+            report,
+            user_confirmed=args.confirm,
+            iso_verified=(iso_verified or args.simulate)
+        )
         print("\n----------------------------------------------------------------")
         print(f"[{'✓' if ok else '❌'}] Préparation du Démarrage Interne :")
         print(f"Message : {msg}")

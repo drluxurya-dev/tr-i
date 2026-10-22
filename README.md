@@ -1,69 +1,80 @@
 # BareInstall
 
-**BareInstall** est un outil open source permettant d'installer des systèmes d'exploitation (prioritairement **Omarchy**) sur un PC sans clé USB ni support externe, en préparant un environnement d'installation démarrable directement depuis le disque dur interne sous Windows 10/11.
+**BareInstall** est un outil open source en Python permettant de préparer et d'installer des systèmes d'exploitation (prioritairement **Omarchy**) sur un PC sans clé USB ni support externe, depuis le disque interne sous Windows 10/11.
 
 ---
 
-## 🎯 Objectifs du Projet
+## 🎯 Objectifs & Principes de Sécurité
 
-1. **Axe principal :** Préparer et amorcer l'installation de la distribution **Omarchy** sans support d'installation USB ou externe.
-2. **Compatibilité cible :** Windows 10/11 64-bit sur Intel Pentium Silver, 4 Go de RAM, disque interne SSD/NVMe/SATA/eMMC (~789 Go).
-3. **Sécurité absolue :**
-   - **Lecture seule :** La première phase du projet est strictement en lecture seule. Aucune modification du disque, des partitions ou du magasin BCD n'est entreprise sans diagnostic explicite.
-   - **Détection des bloqueurs :** Détection préalable de BitLocker, Secure Boot, Fast Startup, de la mémoire RAM et du style de partitionnement (UEFI / GPT).
+1. **Priorité Omarchy :** Préparation de l'installation officielle d'Omarchy conformément à sa documentation officielle.
+2. **Conservation de Windows :** Installation dual-boot sur l'espace libre par défaut. Aucune suppression de partition ni formatage de disque entier n'est effectué automatiquement.
+3. **Vérification Cryptographique ISO Stricte :** Les images ISO doivent être validées via leur empreinte SHA256 officielle (`--expected-sha256`).
+4. **Sauvegarde & Restauration BCD :** Toute modification de démarrage sous Windows exige une sauvegarde préalable du BCD et des privilèges administrateur.
 
 ---
 
-## 📂 Architecture du Projet
+## 📂 Structure du Dépôt
 
 ```
 .
 ├── docs/
-│   ├── FEASIBILITY_STUDY.md   # Étude de faisabilité, risques & méthodes de boot
-│   └── ARCHITECTURE.md        # Architecture logicielle modulaire (7 modules)
+│   ├── FEASIBILITY_STUDY.md   # Étude de faisabilité & contraintes EFI/FAT32
+│   ├── ARCHITECTURE.md        # Architecture logicielle modulaire (7 modules)
+│   ├── RECOVERY_GUIDE.md      # Guide de restauration d'urgence BCD
+│   └── STATUS_REPORT.md       # Matrice de statut & fonctionnalités réelles vs simulées
 ├── bareinstall/
 │   ├── __init__.py
-│   ├── cli.py                 # Interface CLI (Terminal, JSON, Markdown)
-│   └── host_manager/          # Module de diagnostic en lecture seule
-│       ├── __init__.py
-│       ├── models.py          # Dataclasses (SystemReport, DiagnosticSummary)
-│       ├── collector.py       # Collecteur Windows PowerShell/WMI & Mock Linux
-│       └── analyzer.py        # Analyseur des règles d'éligibilité Omarchy
+│   ├── cli.py                 # Interface CLI (Diagnostic, Boot, Verification ISO, Recovery)
+│   ├── host_manager/          # Module de diagnostic en lecture seule
+│   ├── boot_manager/          # Préparation du démarrage interne & BCD
+│   ├── recovery_manager/      # Sauvegarde, vérification et restauration du BCD
+│   ├── os_installer/          # Vérification SHA256 ISO & gestionnaire d'installateur
+│   └── distro_omarchy/        # Plugin de validation des prérequis Omarchy
 └── tests/
-    └── test_host_manager.py   # Suite de tests pytest pour scénarios limites
+    ├── test_host_manager.py   # Suite de tests du diagnostic matériel
+    └── test_modules.py        # Suite de tests d'isolation, BCD, ISO SHA256 & boot
 ```
 
 ---
 
-## 🚀 Utilisation & Exécution
+## 🚀 Utilisation & Commandes CLI
 
 ### 1. Diagnostic Système (Lecture Seule)
-
-Pour exécuter le diagnostic en lecture seule sous Windows :
-
-```bash
+Sous Windows (Invite de commandes / PowerShell administrateur) :
+```cmd
 python -m bareinstall.cli
 ```
 
-#### Exécution en mode simulation (Mock)
-Sur Linux ou pour tester sans matériel Windows réel :
-
+Sur Linux ou en mode simulation (Mock) :
 ```bash
 python3 -m bareinstall.cli --simulate
 ```
 
-#### Exportation des Rapports
-Vous pouvez exporter le rapport de diagnostic aux formats JSON et Markdown :
-
+#### Exporter les Rapports (JSON / Markdown)
 ```bash
 python3 -m bareinstall.cli --simulate --json-out rapport.json --md-out rapport.md
 ```
 
+### 2. Vérification d'Intégrité de l'ISO Omarchy (SHA256)
+```bash
+python3 -m bareinstall.cli --verify-iso /chemin/vers/omarchy.iso --expected-sha256 <EMPREINTE_OFFICIELLE_SHA256>
+```
+
+### 3. Préparation du Démarrage Interne (Windows / Simulation)
+La préparation du démarrage requiert une confirmation explicite (`--confirm`) et une ISO vérifiée :
+```cmd
+python -m bareinstall.cli --prepare-boot --verify-iso C:\omarchy.iso --expected-sha256 <SHA256> --confirm
+```
+
+### 4. Restauration d'Urgence du BCD Windows
+En cas de besoin de restauration du chargeur de démarrage d'origine :
+```cmd
+python -m bareinstall.cli --restore-bcd --confirm
+```
+
 ---
 
-## 🧪 Tests Automatisés
-
-La suite de tests est développée avec `pytest` et couvre l'ensemble des cas de figure matériel (BitLocker actif, RAM insuffisante, BIOS Legacy, Secure Boot activé, MBR vs GPT) :
+## 🧪 Exécution des Tests Automatisés
 
 ```bash
 PYTHONPATH=. pytest
@@ -71,8 +82,8 @@ PYTHONPATH=. pytest
 
 ---
 
-## 📚 Sources Officielles & Documentation
-- **Omarchy Website :** [https://omarchy.org/](https://omarchy.org/)
-- **Omarchy Repository :** [https://github.com/basecamp/omarchy](https://github.com/basecamp/omarchy)
-- **Étude de faisabilité technique :** Voir [docs/FEASIBILITY_STUDY.md](docs/FEASIBILITY_STUDY.md)
-- **Architecture complète :** Voir [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+## 📚 Documentation Complète
+- **Étude de faisabilité :** [docs/FEASIBILITY_STUDY.md](docs/FEASIBILITY_STUDY.md)
+- **Architecture logicielle :** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **Guide de récupération :** [docs/RECOVERY_GUIDE.md](docs/RECOVERY_GUIDE.md)
+- **Matrice de statut :** [docs/STATUS_REPORT.md](docs/STATUS_REPORT.md)
