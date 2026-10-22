@@ -35,7 +35,7 @@ def test_perfect_hardware_scenario():
 
 
 def test_bitlocker_blocker_scenario():
-    """Test BitLocker active on system drive."""
+    """Test BitLocker active on system drive is a BLOCKER per Omarchy documentation."""
     scenario = {
         "firmware_type": "UEFI",
         "cpu_arch": "x86_64",
@@ -53,7 +53,7 @@ def test_bitlocker_blocker_scenario():
 
 
 def test_legacy_bios_blocker_scenario():
-    """Test Legacy BIOS firmware (non-UEFI)."""
+    """Test Legacy BIOS firmware (non-UEFI) is a BLOCKER per Omarchy documentation."""
     scenario = {
         "firmware_type": "Legacy",
         "cpu_arch": "x86_64",
@@ -69,8 +69,26 @@ def test_legacy_bios_blocker_scenario():
     assert any(b.check_id == "FW_UEFI" for b in summary.blockers)
 
 
-def test_insufficient_ram_blocker_scenario():
-    """Test RAM less than 3.5GB."""
+def test_secure_boot_blocker_scenario():
+    """Test Secure Boot enabled is a BLOCKER per Omarchy documentation."""
+    scenario = {
+        "firmware_type": "UEFI",
+        "cpu_arch": "x86_64",
+        "total_ram_gb": 4.0,
+        "sys_free_gb": 100.0,
+        "secure_boot_enabled": True,
+    }
+    collector = MockCollector(scenario)
+    report = collector.collect()
+    analyzer = DiagnosticAnalyzer()
+    summary = analyzer.analyze(report)
+
+    assert summary.can_proceed is False
+    assert any(b.check_id == "SEC_BOOT" for b in summary.blockers)
+
+
+def test_low_ram_warning_scenario():
+    """Test RAM less than 3.5GB is a WARNING (BareInstall recommendation), not a blocker."""
     scenario = {
         "firmware_type": "UEFI",
         "cpu_arch": "x86_64",
@@ -82,12 +100,13 @@ def test_insufficient_ram_blocker_scenario():
     analyzer = DiagnosticAnalyzer()
     summary = analyzer.analyze(report)
 
-    assert summary.can_proceed is False
-    assert any(b.check_id == "MEM_RAM" for b in summary.blockers)
+    # Low RAM is a warning, so can_proceed is still True
+    assert summary.can_proceed is True
+    assert any(w.check_id == "MEM_RAM" for w in summary.warnings)
 
 
-def test_insufficient_disk_space_blocker_scenario():
-    """Test Free Disk Space less than 20GB."""
+def test_low_disk_space_warning_scenario():
+    """Test Free Disk Space less than 15GB is a WARNING (BareInstall recommendation)."""
     scenario = {
         "firmware_type": "UEFI",
         "cpu_arch": "x86_64",
@@ -99,12 +118,12 @@ def test_insufficient_disk_space_blocker_scenario():
     analyzer = DiagnosticAnalyzer()
     summary = analyzer.analyze(report)
 
-    assert summary.can_proceed is False
-    assert any(b.check_id == "DISK_FREE" for b in summary.blockers)
+    assert summary.can_proceed is True
+    assert any(w.check_id == "DISK_FREE" for w in summary.warnings)
 
 
 def test_mbr_partition_blocker_scenario():
-    """Test MBR partition style instead of GPT."""
+    """Test MBR partition style instead of GPT is a BLOCKER."""
     scenario = {
         "firmware_type": "UEFI",
         "cpu_arch": "x86_64",
@@ -121,23 +140,22 @@ def test_mbr_partition_blocker_scenario():
     assert any(b.check_id == "PART_GPT" for b in summary.blockers)
 
 
-def test_secure_boot_warning_scenario():
-    """Test Secure Boot enabled produces a warning, not a blocker."""
+def test_unknown_bitlocker_errors_scenario():
+    """Test error querying BitLocker produces a BLOCKER (never assume unknown = safe)."""
     scenario = {
         "firmware_type": "UEFI",
         "cpu_arch": "x86_64",
         "total_ram_gb": 4.0,
         "sys_free_gb": 100.0,
-        "secure_boot_enabled": True,
+        "sec_errors": ["Permission denied querying BitLocker"]
     }
     collector = MockCollector(scenario)
     report = collector.collect()
     analyzer = DiagnosticAnalyzer()
     summary = analyzer.analyze(report)
 
-    # Secure Boot enabled is a WARNING, so can_proceed is still True
-    assert summary.can_proceed is True
-    assert any(w.check_id == "SEC_BOOT" for w in summary.warnings)
+    assert summary.can_proceed is False
+    assert any(b.check_id == "SEC_BITLOCKER" for b in summary.blockers)
 
 
 def test_reports_formatting():

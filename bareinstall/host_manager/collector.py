@@ -9,7 +9,7 @@ import os
 import json
 import subprocess
 import platform
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from .models import (
     SystemReport, FirmwareInfo, CpuInfo, MemoryInfo,
     DiskInfo, DiskPartition, SecurityInfo
@@ -25,11 +25,14 @@ class BaseCollector:
 class WindowsCollector(BaseCollector):
     """
     Native Windows Collector using PowerShell, WMI, and System APIs.
-    All operations are strictly read-only.
+    All operations are strictly read-only. Captures command errors explicitly.
     """
 
-    def _run_powershell_json(self, command: str) -> Any:
-        """Helper to run a PowerShell command and parse JSON output."""
+    def __init__(self):
+        self.errors: List[str] = []
+
+    def _run_powershell_json(self, command: str) -> Tuple[Any, Optional[str]]:
+        """Helper to run a PowerShell command and parse JSON output. Returns (data, error_str)."""
         try:
             full_cmd = [
                 "powershell",
@@ -43,55 +46,60 @@ class WindowsCollector(BaseCollector):
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=15
+                timeout=20
             )
             if not res.stdout.strip():
-                return None
-            return json.loads(res.stdout)
+                return None, None
+            return json.loads(res.stdout), None
+        except subprocess.TimeoutExpired:
+            err = f"PowerShell command timed out: {command}"
+            self.errors.append(err)
+            return None, err
+        except subprocess.CalledProcessError as e:
+            err = f"PowerShell command failed: {command} (Exit code {e.returncode}): {e.stderr.strip()}"
+            self.errors.append(err)
+            return None, err
         except Exception as e:
-            return None
+            err = f"Unexpected error running PowerShell [{command}]: {str(e)}"
+            self.errors.append(err)
+            return None, err
 
     def _get_firmware_info(self) -> FirmwareInfo:
-        # Check firmware via PowerShell / Get-FirmwareType or BCD
         is_uefi = False
         fw_type = "Unknown"
-        try:
-            # Check PE / Windows firmware env
-            ps_cmd = "$env:firmware_type"
-            output = self._run_powershell_json(ps_cmd)
-            if isinstance(output, str):
-                fw_type = output.strip()
-                if fw_type.upper() == "UEFI":
+        status = "UNKNOWN"
+
+        data, err = self._run_powershell_json("$env:firmware_type")
+        if isinstance(data, str) and data.strip():
+            fw_type = data.strip().upper()
+            status = "OK"
+            if fw_type == "UEFI":
+                is_uefi = True
+        else:
+            comp_info, err2 = self._run_powershell_json("(Get-ComputerInfo).BiosFirmwareType")
+            if isinstance(comp_info, str) and comp_info.strip():
+                fw_type = comp_info.strip().upper()
+                status = "OK"
+                if "UEFI" in fw_type:
                     is_uefi = True
+            else:
+                self.errors.append("Impossible de déterminer le type de firmware UEFI/BIOS.")
 
-            if fw_type == "Unknown":
-                # Try Get-ComputerInfo
-                comp_info = self._run_powershell_json("(Get-ComputerInfo).BiosFirmwareType")
-                if comp_info and isinstance(comp_info, str):
-                    fw_type = comp_info.strip()
-                    if fw_type.upper() == "UEFI":
-                        is_uefi = True
-        except Exception:
-            pass
-
-        return FirmwareInfo(firmware_type=fw_type, is_uefi=is_uefi)
+        return FirmwareInfo(firmware_type=fw_type, is_uefi=is_uefi, status=status)
 
     def _get_cpu_info(self) -> CpuInfo:
         model = platform.processor() or "Unknown CPU"
-        architecture = platform.machine() or "x86_64"
-        cores = os.cpu_count() or 1
+        architecture = platform.machine() or "Unknown"
+        cores = os.cpu_count() or 0
         logical_processors = cores
 
-        try:
-            cpu_data = self._run_powershell_json("Get-CimInstance Win32_Processor | Select-Object Name, Architecture, NumberOfCores, NumberOfLogicalProcessors")
-            if isinstance(cpu_data, list) and len(cpu_data) > 0:
-                cpu_data = cpu_data[0]
-            if isinstance(cpu_data, dict):
-                model = cpu_data.get("Name", model)
-                cores = cpu_data.get("NumberOfCores", cores)
-                logical_processors = cpu_data.get("NumberOfLogicalProcessors", logical_processors)
-        except Exception:
-            pass
+        data, err = self._run_powershell_json("Get-CimInstance Win32_Processor | Select-Object Name, Architecture, NumberOfCores, NumberOfLogicalProcessors")
+        if isinstance(data, list) and len(data) > 0:
+            data = data[0]
+        if isinstance(data, dict):
+            model = data.get("Name", model)
+            cores = data.get("NumberOfCores", cores) or cores
+            logical_processors = data.get("NumberOfLogicalProcessors", logical_processors) or logical_processors
 
         return CpuInfo(
             model=model,
@@ -103,90 +111,93 @@ class WindowsCollector(BaseCollector):
     def _get_memory_info(self) -> MemoryInfo:
         total_ram_gb = 0.0
         avail_ram_gb = 0.0
-        try:
-            mem_data = self._run_powershell_json("Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory")
-            if isinstance(mem_data, dict):
-                tot_kb = mem_data.get("TotalVisibleMemorySize", 0)
-                free_kb = mem_data.get("FreePhysicalMemory", 0)
+        status = "UNKNOWN"
+
+        data, err = self._run_powershell_json("Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory")
+        if isinstance(data, dict):
+            tot_kb = data.get("TotalVisibleMemorySize", 0) or 0
+            free_kb = data.get("FreePhysicalMemory", 0) or 0
+            if tot_kb > 0:
                 total_ram_gb = round(tot_kb / (1024 * 1024), 2)
                 avail_ram_gb = round(free_kb / (1024 * 1024), 2)
-        except Exception:
-            pass
+                status = "OK"
 
-        return MemoryInfo(total_ram_gb=total_ram_gb, available_ram_gb=avail_ram_gb)
+        if status == "UNKNOWN":
+            self.errors.append("Impossible de déterminer la mémoire RAM du système.")
+
+        return MemoryInfo(total_ram_gb=total_ram_gb, available_ram_gb=avail_ram_gb, status=status)
 
     def _get_disks_info(self) -> List[DiskInfo]:
         disks: List[DiskInfo] = []
-        try:
-            physical_disks = self._run_powershell_json("Get-PhysicalDisk | Select-Object DeviceId, FriendlyName, Size, MediaType, BusType")
-            if isinstance(physical_disks, dict):
-                physical_disks = [physical_disks]
 
-            p_disk_map = {}
-            if isinstance(physical_disks, list):
-                for pd in physical_disks:
-                    dev_id = str(pd.get("DeviceId", ""))
-                    p_disk_map[dev_id] = pd
+        physical_disks, _ = self._run_powershell_json("Get-PhysicalDisk | Select-Object DeviceId, FriendlyName, Size, MediaType, BusType")
+        if isinstance(physical_disks, dict):
+            physical_disks = [physical_disks]
+        p_disk_map = {}
+        if isinstance(physical_disks, list):
+            for pd in physical_disks:
+                dev_id = str(pd.get("DeviceId", ""))
+                p_disk_map[dev_id] = pd
 
-            disk_partitions_data = self._run_powershell_json("Get-Disk | Select-Object Number, FriendlyName, Size, PartitionStyle, BusType")
-            if isinstance(disk_partitions_data, dict):
-                disk_partitions_data = [disk_partitions_data]
+        disk_data, _ = self._run_powershell_json("Get-Disk | Select-Object Number, FriendlyName, Size, PartitionStyle, BusType")
+        if isinstance(disk_data, dict):
+            disk_data = [disk_data]
 
-            volumes_data = self._run_powershell_json("Get-Volume | Select-Object DriveLetter, FileSystem, Size, SizeRemaining")
-            vol_map = {}
-            if isinstance(volumes_data, list):
-                for v in volumes_data:
-                    dl = v.get("DriveLetter")
-                    if dl:
-                        vol_map[str(dl).upper()] = v
-            elif isinstance(volumes_data, dict) and volumes_data.get("DriveLetter"):
-                vol_map[str(volumes_data.get("DriveLetter")).upper()] = volumes_data
+        volumes_data, _ = self._run_powershell_json("Get-Volume | Select-Object DriveLetter, FileSystem, Size, SizeRemaining")
+        vol_map = {}
+        if isinstance(volumes_data, list):
+            for v in volumes_data:
+                dl = v.get("DriveLetter")
+                if dl:
+                    vol_map[str(dl).upper()] = v
+        elif isinstance(volumes_data, dict) and volumes_data.get("DriveLetter"):
+            vol_map[str(volumes_data.get("DriveLetter")).upper()] = volumes_data
 
-            if isinstance(disk_partitions_data, list):
-                for d in disk_partitions_data:
-                    num_str = str(d.get("Number", ""))
-                    pd_info = p_disk_map.get(num_str, {})
-                    media_type = pd_info.get("MediaType", "Unknown") if pd_info else "Unknown"
-                    bus_type = str(d.get("BusType", pd_info.get("BusType", "Unknown")))
-                    size_bytes = d.get("Size", 0) or 0
-                    size_gb = round(size_bytes / (1024**3), 2)
-                    part_style = str(d.get("PartitionStyle", "Unknown"))
+        if isinstance(disk_data, list):
+            for d in disk_data:
+                num_str = str(d.get("Number", ""))
+                pd_info = p_disk_map.get(num_str, {})
+                media_type = pd_info.get("MediaType", "Unknown") if pd_info else "Unknown"
+                bus_type = str(d.get("BusType", pd_info.get("BusType", "Unknown")))
+                size_bytes = d.get("Size", 0) or 0
+                size_gb = round(size_bytes / (1024**3), 2)
+                part_style = str(d.get("PartitionStyle", "Unknown"))
 
-                    # Fetch partitions for this disk
-                    parts: List[DiskPartition] = []
-                    parts_ps = self._run_powershell_json(f"Get-Partition -DiskNumber {num_str} | Select-Object DriveLetter, AccessPaths, DriveType, Size")
-                    if isinstance(parts_ps, dict):
-                        parts_ps = [parts_ps]
-                    if isinstance(parts_ps, list):
-                        for p in parts_ps:
-                            dl = p.get("DriveLetter")
-                            dl_str = f"{dl}:" if dl else ""
-                            v_info = vol_map.get(str(dl).upper(), {}) if dl else {}
-                            tot_gb = round((v_info.get("Size", 0) or 0) / (1024**3), 2)
-                            free_gb = round((v_info.get("SizeRemaining", 0) or 0) / (1024**3), 2)
-                            fs = str(v_info.get("FileSystem", "Unknown"))
-                            is_sys = (str(dl).upper() == "C")
+                parts: List[DiskPartition] = []
+                parts_ps, _ = self._run_powershell_json(f"Get-Partition -DiskNumber {num_str} | Select-Object DriveLetter, AccessPaths, DriveType, Size")
+                if isinstance(parts_ps, dict):
+                    parts_ps = [parts_ps]
+                if isinstance(parts_ps, list):
+                    for p in parts_ps:
+                        dl = p.get("DriveLetter")
+                        dl_str = f"{dl}:" if dl else ""
+                        v_info = vol_map.get(str(dl).upper(), {}) if dl else {}
+                        tot_gb = round((v_info.get("Size", 0) or 0) / (1024**3), 2)
+                        free_gb = round((v_info.get("SizeRemaining", 0) or 0) / (1024**3), 2)
+                        fs = str(v_info.get("FileSystem", "Unknown"))
+                        is_sys = (str(dl).upper() == "C")
 
-                            if dl_str or tot_gb > 0:
-                                parts.append(DiskPartition(
-                                    drive_letter=dl_str,
-                                    filesystem=fs,
-                                    total_gb=tot_gb,
-                                    free_gb=free_gb,
-                                    is_system=is_sys
-                                ))
+                        if dl_str or tot_gb > 0:
+                            parts.append(DiskPartition(
+                                drive_letter=dl_str,
+                                filesystem=fs,
+                                total_gb=tot_gb,
+                                free_gb=free_gb,
+                                is_system=is_sys
+                            ))
 
-                    disks.append(DiskInfo(
-                        device_id=num_str,
-                        model=str(d.get("FriendlyName", "Generic Disk")),
-                        size_gb=size_gb,
-                        media_type=str(media_type),
-                        bus_type=bus_type,
-                        partition_style=part_style,
-                        partitions=parts
-                    ))
-        except Exception:
-            pass
+                disks.append(DiskInfo(
+                    device_id=num_str,
+                    model=str(d.get("FriendlyName", "Generic Disk")),
+                    size_gb=size_gb,
+                    media_type=str(media_type),
+                    bus_type=bus_type,
+                    partition_style=part_style,
+                    partitions=parts
+                ))
+
+        if not disks:
+            self.errors.append("Aucun disque physique ou logique n'a pu être identifié sur le système.")
 
         return disks
 
@@ -194,46 +205,40 @@ class WindowsCollector(BaseCollector):
         secure_boot = None
         bitlocker_status = {}
         fast_startup = None
+        sec_errors = []
 
-        # Check Secure Boot
-        try:
-            sb_res = self._run_powershell_json("Confirm-SecureBootUEFI")
-            if isinstance(sb_res, bool):
-                secure_boot = sb_res
-        except Exception:
-            secure_boot = None
+        sb_res, err = self._run_powershell_json("Confirm-SecureBootUEFI")
+        if isinstance(sb_res, bool):
+            secure_boot = sb_res
+        else:
+            sec_errors.append("Impossible de vérifier l'état de Secure Boot (Confirm-SecureBootUEFI non supporté ou droits insuffisants).")
 
-        # Check BitLocker
-        try:
-            bl_res = self._run_powershell_json("Get-BitLockerVolume | Select-Object MountPoint, ProtectionStatus, VolumeStatus")
-            if isinstance(bl_res, dict):
-                bl_res = [bl_res]
-            if isinstance(bl_res, list):
-                for bl in bl_res:
-                    mp = str(bl.get("MountPoint", ""))
-                    status = str(bl.get("VolumeStatus", "Unknown"))
-                    prot = str(bl.get("ProtectionStatus", "Unknown"))
-                    if mp:
-                        bitlocker_status[mp] = f"{status} (Protection: {prot})"
-        except Exception:
-            pass
+        bl_res, err_bl = self._run_powershell_json("Get-BitLockerVolume | Select-Object MountPoint, ProtectionStatus, VolumeStatus")
+        if isinstance(bl_res, dict):
+            bl_res = [bl_res]
+        if isinstance(bl_res, list):
+            for bl in bl_res:
+                mp = str(bl.get("MountPoint", ""))
+                status = str(bl.get("VolumeStatus", "Unknown"))
+                prot = str(bl.get("ProtectionStatus", "Unknown"))
+                if mp:
+                    bitlocker_status[mp] = f"{status} (Protection: {prot})"
+        else:
+            sec_errors.append("Impossible de vérifier l'état de BitLocker via Get-BitLockerVolume.")
 
-        # Check Fast Startup Registry
-        try:
-            reg_res = self._run_powershell_json("(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power').HiberbootEnabled")
-            if isinstance(reg_res, int):
-                fast_startup = (reg_res == 1)
-        except Exception:
-            pass
+        reg_res, err_fs = self._run_powershell_json("(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power').HiberbootEnabled")
+        if isinstance(reg_res, int):
+            fast_startup = (reg_res == 1)
 
         return SecurityInfo(
             secure_boot_enabled=secure_boot,
             bitlocker_status=bitlocker_status,
-            fast_startup_enabled=fast_startup
+            fast_startup_enabled=fast_startup,
+            query_errors=sec_errors
         )
 
     def collect(self) -> SystemReport:
-        errors = []
+        self.errors.clear()
         fw = self._get_firmware_info()
         cpu = self._get_cpu_info()
         mem = self._get_memory_info()
@@ -250,7 +255,7 @@ class WindowsCollector(BaseCollector):
             disks=disks,
             security=sec,
             is_simulated=False,
-            raw_errors=errors
+            raw_errors=list(self.errors)
         )
 
 
@@ -266,7 +271,11 @@ class MockCollector(BaseCollector):
     def collect(self) -> SystemReport:
         fw_type = self.config.get("firmware_type", "UEFI")
         is_uefi = (fw_type.upper() == "UEFI")
-        fw = FirmwareInfo(firmware_type=fw_type, is_uefi=is_uefi)
+        fw = FirmwareInfo(
+            firmware_type=fw_type,
+            is_uefi=is_uefi,
+            status=self.config.get("firmware_status", "OK")
+        )
 
         cpu = CpuInfo(
             model=self.config.get("cpu_model", "Intel Pentium Silver N5030"),
@@ -277,7 +286,8 @@ class MockCollector(BaseCollector):
 
         mem = MemoryInfo(
             total_ram_gb=self.config.get("total_ram_gb", 3.8),
-            available_ram_gb=self.config.get("avail_ram_gb", 2.1)
+            available_ram_gb=self.config.get("avail_ram_gb", 2.1),
+            status=self.config.get("memory_status", "OK")
         )
 
         disk_size = self.config.get("disk_size_gb", 789.0)
@@ -294,26 +304,31 @@ class MockCollector(BaseCollector):
             )
         ]
 
-        disks = [
-            DiskInfo(
-                device_id="0",
-                model=self.config.get("disk_model", "NVMe INTEL SSDPEKNW512G8"),
-                size_gb=disk_size,
-                media_type=self.config.get("media_type", "SSD"),
-                bus_type=self.config.get("bus_type", "NVMe"),
-                partition_style=self.config.get("partition_style", "GPT"),
-                partitions=parts
-            )
-        ]
+        disks = self.config.get("disks_override")
+        if disks is None:
+            disks = [
+                DiskInfo(
+                    device_id="0",
+                    model=self.config.get("disk_model", "NVMe INTEL SSDPEKNW512G8"),
+                    size_gb=disk_size,
+                    media_type=self.config.get("media_type", "SSD"),
+                    bus_type=self.config.get("bus_type", "NVMe"),
+                    partition_style=self.config.get("partition_style", "GPT"),
+                    partitions=parts
+                )
+            ]
 
         bl_status = {}
         if bitlocker_on:
             bl_status["C:"] = "FullyEncrypted (Protection: On)"
+        elif self.config.get("bitlocker_status_override"):
+            bl_status = self.config.get("bitlocker_status_override")
 
         sec = SecurityInfo(
             secure_boot_enabled=self.config.get("secure_boot_enabled", False),
             bitlocker_status=bl_status,
-            fast_startup_enabled=self.config.get("fast_startup_enabled", True)
+            fast_startup_enabled=self.config.get("fast_startup_enabled", True),
+            query_errors=self.config.get("sec_errors", [])
         )
 
         return SystemReport(
@@ -326,7 +341,7 @@ class MockCollector(BaseCollector):
             disks=disks,
             security=sec,
             is_simulated=True,
-            raw_errors=[]
+            raw_errors=self.config.get("raw_errors", [])
         )
 
 

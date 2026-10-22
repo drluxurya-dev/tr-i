@@ -1,7 +1,7 @@
 """
 BareInstall Command Line Interface (CLI).
-Provides terminal output, JSON output, and Markdown report export for Phase B diagnostics.
-STRICTLY READ-ONLY.
+Provides terminal output, JSON output, Markdown report export, boot preparation, ISO verification, and BCD recovery.
+STRICTLY SAFE & READ-ONLY BY DEFAULT.
 """
 
 import sys
@@ -12,6 +12,10 @@ from dataclasses import asdict
 from typing import Optional
 
 from bareinstall.host_manager import get_collector, DiagnosticAnalyzer, DiagnosticSummary, SystemReport
+from bareinstall.boot_manager import BootManager
+from bareinstall.recovery_manager import RecoveryManager
+from bareinstall.os_installer import IsoManager
+from bareinstall.distro_omarchy import OmarchyPlugin
 
 
 def render_terminal_summary(summary: DiagnosticSummary) -> str:
@@ -37,7 +41,7 @@ def render_terminal_summary(summary: DiagnosticSummary) -> str:
 
     if summary.can_proceed:
         lines.append(" STATUS GLOBAL : COMPATIBLE [✓]")
-        lines.append(" La machine respecte les prérequis pour une préparation d'installation.")
+        lines.append(" La machine respecte l'ensemble des prérequis d'installation.")
     else:
         lines.append(" STATUS GLOBAL : INCOMPATIBLE / BLOQUÉ [✗]")
         lines.append(" Des obstacles critiques empêchent la poursuite des opérations.")
@@ -47,7 +51,7 @@ def render_terminal_summary(summary: DiagnosticSummary) -> str:
     if summary.blockers:
         lines.append("\n[!] ÉLÉMENTS BLOQUANTS (BLOCKERS) :")
         for b in summary.blockers:
-            lines.append(f"  ❌ [{b.category}] {b.title}")
+            lines.append(f"  ❌ [{b.category}] {b.title} ({b.source})")
             lines.append(f"     Message : {b.message}")
             if b.details:
                 lines.append(f"     Détails : {b.details}")
@@ -55,19 +59,23 @@ def render_terminal_summary(summary: DiagnosticSummary) -> str:
     if summary.warnings:
         lines.append("\n[?] AVERTISSEMENTS (WARNINGS) :")
         for w in summary.warnings:
-            lines.append(f"  ⚠️ [{w.category}] {w.title}")
+            lines.append(f"  ⚠️ [{w.category}] {w.title} ({w.source})")
             lines.append(f"     Message : {w.message}")
             if w.details:
                 lines.append(f"     Détails : {w.details}")
 
     if summary.passed_checks:
-        lines.append("\n[✓] VERIFICATIONS CONCLUANTES :")
+        lines.append("\n[✓] VÉRIFICATIONS CONCLUANTES :")
         for p in summary.passed_checks:
             lines.append(f"  ✓ [{p.category}] {p.title}: {p.message}")
 
+    if summary.raw_errors:
+        lines.append("\n[ERR] ERREURS RENCONTRÉES LORS DU DIAGNOSTIC :")
+        for err in summary.raw_errors:
+            lines.append(f"  • {err}")
+
     lines.append("================================================================")
-    lines.append(" Note : Ce diagnostic est strictement en LECTURE SEULE.")
-    lines.append(" Aucune modification n'a été effectuée sur vos disques ou le BCD.")
+    lines.append(" Note : Ce diagnostic par défaut est strictement en LECTURE SEULE.")
     lines.append("================================================================")
     return "\n".join(lines)
 
@@ -107,7 +115,7 @@ def render_markdown_report(summary: DiagnosticSummary) -> str:
     if summary.blockers:
         lines.append("### ❌ Éléments Bloquants")
         for b in summary.blockers:
-            lines.append(f"- **[{b.category}] {b.title}**")
+            lines.append(f"- **[{b.category}] {b.title}** (`{b.source}`)")
             lines.append(f"  - *Message :* {b.message}")
             if b.details:
                 lines.append(f"  - *Détails :* {b.details}")
@@ -115,7 +123,7 @@ def render_markdown_report(summary: DiagnosticSummary) -> str:
     if summary.warnings:
         lines.append("### ⚠️ Avertissements")
         for w in summary.warnings:
-            lines.append(f"- **[{w.category}] {w.title}**")
+            lines.append(f"- **[{w.category}] {w.title}** (`{w.source}`)")
             lines.append(f"  - *Message :* {w.message}")
             if w.details:
                 lines.append(f"  - *Détails :* {w.details}")
@@ -125,6 +133,11 @@ def render_markdown_report(summary: DiagnosticSummary) -> str:
         for p in summary.passed_checks:
             lines.append(f"- **[{p.category}] {p.title} :** {p.message}")
 
+    if summary.raw_errors:
+        lines.append("### 🛑 Erreurs de Diagnostic")
+        for err in summary.raw_errors:
+            lines.append(f"- `{err}`")
+
     lines.append("")
     lines.append("---")
     lines.append("*Rapport généré automatiquement en lecture seule par BareInstall.*")
@@ -133,7 +146,7 @@ def render_markdown_report(summary: DiagnosticSummary) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="BareInstall Host Diagnostic Tool - Diagnostic en lecture seule pour installation sans clé USB."
+        description="BareInstall CLI - Outil complet de diagnostic, préparation de boot et récupération pour Omarchy."
     )
     parser.add_argument(
         "--simulate",
@@ -153,13 +166,54 @@ def main():
         help="Chemin de fichier pour exporter le rapport au format Markdown."
     )
     parser.add_argument(
+        "--prepare-boot",
+        action="store_true",
+        help="Préparer le démarrage interne et sauvegarder le BCD (Nécessite --confirm)."
+    )
+    parser.add_argument(
+        "--restore-bcd",
+        action="store_true",
+        help="Restaurer le BCD Windows depuis la sauvegarde d'urgence."
+    )
+    parser.add_argument(
+        "--verify-iso",
+        type=str,
+        default=None,
+        help="Vérifier l'intégrité (SHA256) d'un fichier ISO Omarchy local."
+    )
+    parser.add_argument(
+        "--expected-sha256",
+        type=str,
+        default=None,
+        help="Empreinte SHA256 attendue pour la vérification ISO."
+    )
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirmer explicitement l'exécution d'une opération modifiant le système."
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
-        help="Ne pas afficher le rapport dans la console."
+        help="Ne pas afficher le rapport de diagnostic dans la console."
     )
 
     args = parser.parse_args()
 
+    # Mode 1: Restore BCD
+    if args.restore_bcd:
+        rec = RecoveryManager(simulated=args.simulate)
+        ok, msg = rec.restore_bcd()
+        print(f"[{'✓' if ok else '❌'}] Restauration BCD : {msg}")
+        sys.exit(0 if ok else 1)
+
+    # Mode 2: Verify ISO
+    if args.verify_iso:
+        ok, msg = IsoManager.verify_iso(args.verify_iso, expected_sha256=args.expected_sha256)
+        print(f"[{'✓' if ok else '❌'}] Intégrité ISO : {msg}")
+        sys.exit(0 if ok else 1)
+
+    # Mode 3: Diagnostic Standard
     collector = get_collector(simulated=args.simulate)
     report = collector.collect()
     analyzer = DiagnosticAnalyzer()
@@ -177,6 +231,16 @@ def main():
         with open(args.md_out, "w", encoding="utf-8") as f:
             f.write(render_markdown_report(summary))
         print(f"Rapport Markdown exporté avec succès dans : {args.md_out}")
+
+    # Mode 4: Prepare Boot (if requested)
+    if args.prepare_boot:
+        bm = BootManager(simulated=args.simulate)
+        ok, msg = bm.prepare_boot(report, user_confirmed=args.confirm)
+        print("\n----------------------------------------------------------------")
+        print(f"[{'✓' if ok else '❌'}] Préparation du Démarrage Interne :")
+        print(f"Message : {msg}")
+        print("----------------------------------------------------------------")
+        sys.exit(0 if ok else 1)
 
     sys.exit(0 if summary.can_proceed else 1)
 

@@ -19,6 +19,7 @@ class CpuInfo:
 class MemoryInfo:
     total_ram_gb: float
     available_ram_gb: float
+    status: str = "OK"  # "OK", "UNKNOWN", "ERROR"
 
 
 @dataclass
@@ -37,21 +38,23 @@ class DiskInfo:
     size_gb: float
     media_type: str  # e.g., NVMe, SSD, HDD, eMMC, Unknown
     bus_type: str
-    partition_style: str  # GPT or MBR
+    partition_style: str  # GPT, MBR, or Unknown
     partitions: List[DiskPartition] = field(default_factory=list)
 
 
 @dataclass
 class SecurityInfo:
-    secure_boot_enabled: Optional[bool]
-    bitlocker_status: Dict[str, str] = field(default_factory=dict)  # Drive letter -> status (e.g. "FullyEncrypted", "Off")
+    secure_boot_enabled: Optional[bool]  # True, False, None if query failed
+    bitlocker_status: Dict[str, str] = field(default_factory=dict)  # Drive letter -> status
     fast_startup_enabled: Optional[bool] = None
+    query_errors: List[str] = field(default_factory=list)
 
 
 @dataclass
 class FirmwareInfo:
     firmware_type: str  # UEFI, Legacy, or Unknown
     is_uefi: bool
+    status: str = "OK"  # "OK", "UNKNOWN", "ERROR"
 
 
 @dataclass
@@ -75,6 +78,7 @@ class DiagnosticCheck:
     title: str
     passed: bool
     severity: str  # "BLOCKER", "WARNING", "INFO"
+    source: str    # "OFFICIAL_OMARCHY", "BAREINSTALL_RECOMMENDATION", "SYSTEM_SAFETY"
     message: str
     details: Optional[str] = None
 
@@ -85,4 +89,5 @@ class DiagnosticSummary:
     blockers: List[DiagnosticCheck] = field(default_factory=list)
     warnings: List[DiagnosticCheck] = field(default_factory=list)
     passed_checks: List[DiagnosticCheck] = field(default_factory=list)
+    raw_errors: List[str] = field(default_factory=list)
     system_report: Optional[SystemReport] = None
