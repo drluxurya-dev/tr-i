@@ -65,7 +65,7 @@ class BootManager:
 
         if not summary.can_proceed:
             blocker_msgs = [f"- [{b.category}] {b.title}: {b.message}" for b in summary.blockers]
-            return False, "ÉCHEC DIAGNOSTIC PREALABLE : Des éléments bloquants empêchent la préparation du démarrage :\n" + "\n".join(blocker_msgs)
+            return False, "ÉCHEC DIAGNOSTIC PRÉALABLE : Des éléments bloquants empêchent la préparation du démarrage :\n" + "\n".join(blocker_msgs)
 
         # 5. Backup BCD
         ok_backup, bcd_msg = self.recovery.backup_bcd()
@@ -75,11 +75,11 @@ class BootManager:
         # 6. Execution (Simulation vs Windows Real)
         if self.simulated:
             return True, (
-                f"[MODE SIMULATION / MOCK]\n"
+                f"[FONCTIONNALITÉ EXPÉRIMENTALE / SIMULÉE]\n"
                 f"- Sauvegarde BCD simulée : {bcd_msg}\n"
                 f"- Repertoire de staging simulé : {self.STAGING_DIR}\n"
-                f"- Inscription de l'entrée de boot EFI dans le BCD simulée avec succès.\n"
-                f"Note : En environnement réel Windows, l'entrée BCD est créée via bcdedit."
+                f"- AVERTISSEMENT TECHNIQUE : L'amorçage Linux sans clé USB n'a pas été validé sur matériel physique.\n"
+                f"  L'inscription BCD est considérée comme expérimentale et non démontrée sans support externe."
             )
 
         # Real Windows Execution
@@ -89,21 +89,13 @@ class BootManager:
             with open(manifest_path, "w", encoding="utf-8") as f:
                 f.write('{"status": "staged", "target_distro": "Omarchy"}')
 
-            # Real BCD Creation via bcdedit
-            cmd_create = ["bcdedit", "/create", "/d", "BareInstall Omarchy Installer", "/application", "bootsector"]
-            res = subprocess.run(cmd_create, capture_output=True, text=True, check=True)
-            output = res.stdout.strip()
-
             return True, (
-                f"PRÉPARATION RÉUSSIE (WINDOWS REEL) :\n"
+                f"PRÉPARATION DU STAGING RÉUSSIE (WINDOWS REEL) :\n"
                 f"- Sauvegarde BCD effectuée : {bcd_msg}\n"
                 f"- Fichiers de staging créés : {self.STAGING_DIR}\n"
-                f"- Inscription BCD exécutée : {output}"
+                f"- NOTE DE SÉCURITÉ : Aucune modification irréversible du BCD n'a été appliquée.\n"
+                f"  L'amorçage autonome sans clé USB reste une fonctionnalité expérimentale."
             )
-        except subprocess.CalledProcessError as e:
-            # Automatic Rollback attempt
-            self.recovery.restore_bcd(user_confirmed=True)
-            return False, f"ÉCHEC INCRIPTION BCD (Code {e.returncode}) : {e.stderr.strip()}.\nLe BCD d'origine a été automatiquement restauré."
         except Exception as e:
             self.recovery.restore_bcd(user_confirmed=True)
             return False, f"ERREUR SYSTÈME lors de la préparation : {str(e)}.\nLe BCD d'origine a été restauré."

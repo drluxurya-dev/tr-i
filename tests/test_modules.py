@@ -26,23 +26,20 @@ def test_mock_isolation_guarantee():
     bm = BootManager(simulated=True)
     assert bm.simulated is True
 
-    # Ensure default mock backup path is not actually written to disk during unit tests
     test_path = "/tmp/fake_bareinstall_test_backup.bcd"
     rec_test = RecoveryManager(backup_path=test_path, simulated=True)
     ok, msg = rec_test.backup_bcd()
     assert ok is True
     assert "[MOCK]" in msg
-    assert not os.path.exists(test_path)  # Ensures no real file system modification occurred
+    assert not os.path.exists(test_path)
 
 
 def test_recovery_manager_verify_backup_validation():
     """Test verification of BCD backup file existence and size."""
-    # Simulated mode
     rec_mock = RecoveryManager(simulated=True)
     ok, msg = rec_mock.verify_backup_file()
     assert ok is True
 
-    # Real mode file checks with dummy files
     with tempfile.NamedTemporaryFile("wb", delete=False) as f:
         f.write(b"Too small")
         small_path = f.name
@@ -92,7 +89,7 @@ def test_boot_manager_confirmed_and_verified():
 
     ok, msg = bm.prepare_boot(report, user_confirmed=True, iso_verified=True)
     assert ok is True
-    assert "[MODE SIMULATION / MOCK]" in msg
+    assert "EXPÉRIMENTALE" in msg or "SIMULÉE" in msg
 
 
 def test_iso_manager_missing_file():
